@@ -1,7 +1,6 @@
 import { Event } from '../data/mockEvents';
 
-const SHEET_ID = "1b67j1jYOSKzbUViNIqAHESaoZ31HVUQTsXSK3C5ESqU";
-const GVIZ_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=0`;
+const EXPORT_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTouohnGGXpsh61xSxwiW7md1YOdtTYi9_qRxHf5jqdqQCZX-m2GRGI80f476J4j-Kze-CeLPsEHKNM/pub?output=csv";
 
 function normalizeImageUrl(v: string | null | undefined): string | null {
   if (!v) return null;
@@ -15,37 +14,60 @@ function normalizeImageUrl(v: string | null | undefined): string | null {
   return `https://lh3.googleusercontent.com/d/${m[1]}`;
 }
 
-interface SheetRow {
-  c: Array<{ v: any; f?: string } | null>;
-}
+// Helper to parse CSV line handling quoted fields
+function parseCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
 
-interface SheetResponse {
-  table: {
-    cols: Array<{ label: string; type: string }>;
-    rows: SheetRow[];
-  };
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (char === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (char === ',' && !inQuotes) {
+      result.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  result.push(current);
+
+  return result.map(field => field.replace(/^"|"$/g, ''));
 }
 
 export async function fetchEventsFromSheet(): Promise<Event[]> {
   try {
-    const response = await fetch(GVIZ_URL);
-    const text = await response.text();
-    
-    // Google Visualization API returns JSONP, need to extract JSON
-    const jsonString = text.substring(47).slice(0, -2);
-    const data: SheetResponse = JSON.parse(jsonString);
-    
-    const rows = data.table.rows;
-    const cols = data.table.cols;
-    
-    // Map column labels to indices for easier access
-    const getColIndex = (label: string) => 
-      cols.findIndex(col => col.label.toLowerCase().includes(label.toLowerCase()));
-    
-    const events: Event[] = rows.map((row, index) => {
+    const response = await fetch(EXPORT_URL);
+    if (!response.ok) {
+      console.error(`HTTP error! status: ${response.status}`);
+      return [];
+    }
+
+    const csvText = await response.text();
+    const lines = csvText.split('\n').filter(line => line.trim());
+
+    if (lines.length < 2) {
+      console.warn('No data rows in CSV');
+      return [];
+    }
+
+    // Parse header row
+    const headers = parseCSVLine(lines[0]);
+
+    // Parse data rows
+    return lines.slice(1).map((line, index) => {
+      const values = parseCSVLine(line);
+
       const getCell = (labelPart: string) => {
-        const idx = getColIndex(labelPart);
-        return idx >= 0 && row.c[idx] ? row.c[idx]?.v : null;
+        const idx = headers.findIndex(h => h.toLowerCase().includes(labelPart.toLowerCase()));
+        return idx >= 0 && values[idx] ? values[idx].trim() : null;
       };
 
       // Extract data from cells
@@ -128,15 +150,12 @@ export async function fetchEventsFromSheet(): Promise<Event[]> {
       if (!event.title || event.title === 'Untitled Event') return false;
       
       // Filter out events with title that is purely dashes (e.g., "---", "-")
-      if (/^-+$/.test(String(event.title).trim())) return false;
-      
-      // Filter out events with event code that is purely dashes (e.g., "---", "-")
-      if (event.eventCode && /^-+$/.test(String(event.eventCode).trim())) return false;
-      
+      // Also filter out events with event code that is purely dashes
+      if (/^-+$/.test(String(event.title).trim()) ||
+          (event.eventCode && /^-+$/.test(String(event.eventCode).trim()))) return false;
+
       return true;
     });
-    
-    return events;
   } catch (error) {
     console.error('Error fetching events from sheet:', error);
     return [];
@@ -152,7 +171,7 @@ function parseSchedule(raw: any): Array<{ time: string; activity: string }> | un
       return JSON.parse(raw);
     }
     // Try line-by-line format: "10:00 AM - Activity"
-    const lines = String(raw).split(/\n|;|\|/).map(l => l.trim()).filter(Boolean);
+    const lines = String(raw).split(/[\n;|]/).map(l => l.trim()).filter(Boolean);
     return lines.map(line => {
       const parts = line.split(/[-–—:](.+)/);
       return {
@@ -173,7 +192,7 @@ function parseRounds(raw: any): Array<{ name: string; description: string }> | u
       return JSON.parse(raw);
     }
     // Try line-by-line format
-    const lines = String(raw).split(/\n|;|\|/).map(l => l.trim()).filter(Boolean);
+    const lines = String(raw).split(/[\n;|]/).map(l => l.trim()).filter(Boolean);
     return lines.map(line => ({
       name: line,
       description: ''
@@ -191,7 +210,7 @@ function parseRules(raw: any): string[] | undefined {
       return JSON.parse(raw);
     }
     // Split by newlines, semicolons, or pipes
-    return String(raw).split(/\n|;|\|/).map(r => r.trim()).filter(Boolean);
+    return String(raw).split(/[\n;|]/).map(r => r.trim()).filter(Boolean);
   } catch {
     return undefined;
   }
